@@ -1,0 +1,63 @@
+# Full-corpus dual-GPU run: two shards, one pinned to each GPU. Each container
+# sees only its assigned GPU, renumbered to index 0 inside — so BOTH shards pass
+# --gpu 0. No --limit, so each shard processes its half of the entire corpus.
+#
+# Paths and the host user are read from a .env file in this directory. Copy the
+# template and edit it once:
+#
+#   cp .env.example .env      # then edit INPUT_DIR / OUTPUT_DIR / CKPT_DIR
+#   docker compose up --build
+#   docker compose down       # after completion
+#
+# rembg is OFF by default (this pipeline sends every image straight to SAM 3).
+# To enable the rembg pre-pass, add `--use-rembg` to the command lists below.
+# --max-fill 0.98 suits boles that fill most of the frame; retune per dataset.
+#
+# If you have only one GPU, run the single-container command in the README
+# instead of this compose file.
+
+x-common: &common
+  image: bole-mask:latest
+  build:
+    context: .
+    dockerfile: Dockerfile
+  user: "${HOST_UID:-1000}:${HOST_GID:-1000}"      # outputs owned by your host user
+  volumes:
+    - ${INPUT_DIR:?set INPUT_DIR in .env}:/data/in:ro
+    - ${OUTPUT_DIR:?set OUTPUT_DIR in .env}:/data/out
+    - ${CKPT_DIR:?set CKPT_DIR in .env}:/models:ro   # dir holds sam3.pt + config.json
+
+services:
+  shard0:
+    <<: *common
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['0']
+              capabilities: [gpu]
+    command: >
+      --input-dir /data/in
+      --output-dir /data/out/out
+      --sam3-checkpoint /models/sam3.pt
+      --prompt "tree trunk"
+      --max-fill 0.98
+      --gpu 0 --shard-index 0 --shard-count 2
+
+  shard1:
+    <<: *common
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ['1']
+              capabilities: [gpu]
+    command: >
+      --input-dir /data/in
+      --output-dir /data/out/out
+      --sam3-checkpoint /models/sam3.pt
+      --prompt "tree trunk"
+      --max-fill 0.98
+      --gpu 0 --shard-index 1 --shard-count 2

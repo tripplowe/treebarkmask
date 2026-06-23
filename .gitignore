@@ -1,0 +1,19 @@
+# Local config and secrets
+.env
+
+# Model checkpoint (gated, ~3.2 GB — download per the README)
+sam3_ckpt/
+*.pt
+
+# Run outputs
+out/
+**/review_gallery/
+*.csv
+
+# Personal notes (kept out of the public repo; remove this line to include)
+NOTES.md
+
+# Python
+__pycache__/
+*.pyc
+.venv/

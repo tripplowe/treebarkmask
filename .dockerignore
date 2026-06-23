@@ -1,0 +1,13 @@
+# Keep the build context tiny: only the pipeline source needs to go in.
+.env
+sam3_ckpt/
+out/
+**/review_gallery/
+*.csv
+*.pt
+*.onnx
+NOTES.md
+.git/
+__pycache__/
+*.pyc
+.venv/
