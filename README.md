@@ -66,7 +66,9 @@ accept/reject rule grounded in the dataset's geometry.
 This was developed on dual RTX A4500s (20 GB each), but a single modern GPU works
 fine; the model is ~0.8B parameters and inference fits comfortably on typical
 workstation cards. One GPU just means using the single-container run command
-instead of the compose file.
+instead of the compose file. **No local NVIDIA GPU at all?** See
+[Running without a local NVIDIA GPU](#running-without-a-local-nvidia-gpu) for
+Colab, cloud-VM, and HPC-cluster options.
 
 ## Setup
 
@@ -183,6 +185,129 @@ match your hardware, incrementing `device_ids`. Note the deliberate quirk: each
 container is given exactly one GPU, which appears as index 0 *inside* the container,
 so **every shard passes `--gpu 0`** — the physical card is selected by `device_ids`,
 not by `--gpu`.
+
+## Running without a local NVIDIA GPU
+
+This pipeline requires CUDA, so it can't use an Apple Silicon GPU, an AMD GPU, or
+integrated laptop graphics. (It will fall back to CPU, but SAM 3 on CPU is minutes
+per image — fine for trying one or two, not a corpus.) If you don't have a local
+NVIDIA GPU, here are three alternatives, from closest-to-this-README to most
+accessible.
+
+### Option 1 — Rent a cloud GPU VM (Docker workflow unchanged)
+
+*Best for: running the full corpus; keeping this README exactly as written.*
+
+Providers such as Lambda, RunPod, Vast.ai, Paperspace, or the major clouds
+(AWS/GCP/Azure) rent hourly Linux VMs with an NVIDIA GPU, and many ship a "deep
+learning" image with Docker and the NVIDIA Container Toolkit already installed.
+Once you have a shell on the VM, follow Setup steps 2–5 as written (skip step 2 if
+the toolkit is preinstalled — `docker run --rm --gpus all
+nvidia/cuda:13.0.1-base-ubuntu24.04 nvidia-smi` confirms it), copy your photos up
+(`rsync -av ./photos/ user@vm:/data/in/`), download the checkpoint on the VM with
+your HF token, and run the single-GPU command from "Full corpus." A modest GPU
+(L4, A10, or any RTX-class card) is plenty; if you get a T4, see "Older GPUs" below.
+
+### Option 2 — Google Colab (free / low-cost; no Docker)
+
+*Best for: testing and small batches without spending money.*
+
+Colab can't run Docker, so you run the pipeline natively in the Colab Python
+runtime instead. Open a notebook, set **Runtime → Change runtime type → GPU**, then
+run these cells in order:
+
+```python
+# 1. Check the GPU and whether it supports bfloat16
+!nvidia-smi -L
+import torch; print("bf16 supported:", torch.cuda.is_bf16_supported())
+```
+
+```bash
+# 2. Get the code
+!git clone https://github.com/tripplowe/treebarkmask.git
+%cd treebarkmask
+```
+
+```bash
+# 3. Install dependencies (uses Colab's preinstalled torch; mirrors the Dockerfile)
+!pip install -q -r requirements.txt "git+https://github.com/facebookresearch/sam3.git"
+```
+
+> This pins NumPy to 1.26. If Colab asks to restart the runtime, do it
+> (**Runtime → Restart session**), then re-run the `%cd treebarkmask` cell before
+> continuing.
+
+```python
+# 4. Free Colab GPUs are T4s (Turing, no bf16). If cell 1 printed False, switch to fp16:
+import torch
+if not torch.cuda.is_bf16_supported():
+    !sed -i 's/torch.bfloat16/torch.float16/g' bole_mask_pipeline.py
+    print("patched bole_mask_pipeline.py to fp16")
+```
+
+```python
+# 5. Mount Google Drive for the checkpoint, your photos, and outputs
+from google.colab import drive; drive.mount('/content/drive')
+```
+
+```python
+# 6. Download the gated SAM 3 checkpoint once, cached on Drive (see Setup step 3 for access)
+import os
+os.environ["HF_TOKEN"] = "hf_your_token_here"   # from huggingface.co/settings/tokens
+from huggingface_hub import snapshot_download
+ckpt = "/content/drive/MyDrive/sam3_ckpt"
+if not os.path.exists(ckpt + "/sam3.pt"):
+    snapshot_download("facebook/sam3", local_dir=ckpt)
+```
+
+```bash
+# 7. Run (put your photos in a Drive folder; outputs go to Drive so they survive disconnects)
+!python bole_mask_pipeline.py \
+  --input-dir  /content/drive/MyDrive/bark_photos \
+  --output-dir /content/drive/MyDrive/treebarkmask_out \
+  --sam3-checkpoint /content/drive/MyDrive/sam3_ckpt/sam3.pt \
+  --prompt "tree trunk" --gpu 0 --max-fill 0.98 --limit 50
+```
+
+Colab caveats: sessions disconnect when idle and cap at a few hours, and the free
+T4 has 16 GB — fine for inference but not for the full ~5,000-image corpus in one
+sitting. Use `--limit` or process subsets, and keep outputs on Drive. The review
+gallery works the same way; after generating it, download the `review_gallery/`
+folder from Drive and open `index.html` locally — no SSH tunnel needed.
+
+### Option 3 — University HPC cluster (Apptainer / Singularity)
+
+*Best for: students with cluster access and large runs.*
+
+Shared clusters usually forbid Docker but provide Apptainer (formerly Singularity),
+which can run Docker images. Build the image somewhere you have Docker and push it
+to a registry (or save a tarball with `docker save`), then on the cluster:
+
+```bash
+apptainer build bole-mask.sif docker://YOUR_REGISTRY/bole-mask:latest
+# or from a tarball:  apptainer build bole-mask.sif docker-archive://bole-mask.tar
+
+apptainer exec --nv \
+  --bind /path/to/photos:/data/in:ro \
+  --bind /path/to/workdir:/data/out \
+  --bind /path/to/sam3_ckpt:/models:ro \
+  bole-mask.sif \
+  python /app/bole_mask_pipeline.py \
+    --input-dir /data/in --output-dir /data/out/out \
+    --sam3-checkpoint /models/sam3.pt --prompt "tree trunk" \
+    --gpu 0 --max-fill 0.98
+```
+
+`--nv` exposes the GPU and `--bind` replaces Docker's `-v`. Wrap the `apptainer
+exec` in a SLURM script (`#SBATCH --gres=gpu:1`) for queued runs. If the cluster's
+GPUs are Turing-era, apply the fp16 edit (below) before building.
+
+### Older GPUs (Turing / pre-Ampere, including Colab's free T4)
+
+These lack bfloat16. Switch the autocast dtype in `bole_mask_pipeline.py` from
+`torch.bfloat16` to `torch.float16` (the `sed` line in the Colab cells above does
+this automatically; for Docker/cluster, edit before building). `debug_sam3.py`
+prints whether bf16 is supported. Everything else is unchanged.
 
 ## Outputs
 
